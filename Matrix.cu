@@ -4,15 +4,7 @@
 
 #include "Matrix.cuh"
 
-#define gpuErrorChek(ans) { gpuAssert((ans), __FILE__, __LINE__); }
-inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
-{
-    if (code != cudaSuccess)
-    {
-        fprintf(stderr,"GPUAssert: %s %d %s %d\n", cudaGetErrorString(code), code, file, line);
-        if (abort) exit(code);
-    }
-}
+
 
 __global__ void addMatrix(const float* A, const float* B, float* C, int Cols){
     unsigned int Row = blockIdx.y*TILE_DIM + threadIdx.y;
@@ -21,8 +13,9 @@ __global__ void addMatrix(const float* A, const float* B, float* C, int Cols){
     C[Row*Cols+Col] = A[Row*Cols+Col] + B[Row*Cols+Col];
 }
 
+template<typename T>
 __global__ void
-MatMul(const float* A,const float* B, float* C, int ARows, int ACols, int BRows,
+MatMul(const T* A,const T* B, T* C, int ARows, int ACols, int BRows,
        int BCols, int CRows, int CCols)
 {
     float CValue = 0;
@@ -57,74 +50,6 @@ MatMul(const float* A,const float* B, float* C, int ARows, int ACols, int BRows,
         C[((blockIdx.y * blockDim.y + threadIdx.y)*CCols) +
           (blockIdx.x * blockDim.x)+ threadIdx.x] = CValue;
 }
-
-template<typename T>
-__global__ void kernel_SLAE_To_Triangle(T *A, T *B,int n,int number_row,int number_column){
-    unsigned int bx=blockIdx.x;
-    unsigned int by=blockIdx.y;
-
-    unsigned int tx=threadIdx.x;
-    unsigned int ty=threadIdx.y;
-
-    unsigned int row=by*TILE_DIM+ty;
-    unsigned int column=bx*TILE_DIM+tx;
-
-    if(number_column<=column && number_row<row && row<n && column<n){
-        T coefficient =A[row*n+number_column]/A[number_row*n+number_column];
-        //printf("%d %d %f %f %f %f %f\n", row, column, A[row*n+number_column], A[number_row*n+number_column], coefficient, A[row*n+column], A[number_row*n+column]);
-        if(number_column==column) {
-            //B[row]-=B[number_row]*coefficient;
-            A[row*n+column] = 0;
-        }else{
-            A[row*n+column]-=coefficient*A[number_row*n+column];
-        }
-    }
-}
-
-template<typename T>
-__global__ void kernel_down(T *A, int n,int number_row,int number_column){
-    unsigned int bx=blockIdx.x;
-    unsigned int by=blockIdx.y;
-
-    unsigned int tx=threadIdx.x;
-    unsigned int ty=threadIdx.y;
-
-    unsigned int row=by*TILE_DIM+ty;
-    unsigned int column=bx*TILE_DIM+tx;
-
-    if(number_column<=column && number_row<row && row<n && column<n){
-        T coefficient =A[row*n+number_column]/A[number_row*n+number_column];
-        //printf("%d %d %d %d %f %f %f %f %f\n", row, number_row, column, number_column, A[row*n+number_column], A[number_row*n+number_column], coefficient, A[row*n+column], A[number_row*n+column]);
-        if(number_column==column) {
-            //B[row]-=B[number_row]*coefficient;
-            A[row*n+column] = 0;
-        }else{
-            A[row*n+column]-=coefficient*A[number_row*n+column];
-        }
-    }
-}
-
-template<typename T>
-__attribute__((unused))
-__global__ void kernel_up(T *A,T *B,int n,int number_row,int number_column){
-    unsigned int bx=blockIdx.x;
-    unsigned int by=blockIdx.y;
-
-    unsigned int tx=threadIdx.x;
-    unsigned int ty=threadIdx.y;
-
-    unsigned int row=by*TILE_DIM+ty;
-    unsigned int column=bx*TILE_DIM+tx;
-
-    if(number_column==column && number_row>row){
-        T coefficient=A[row*n+number_column]/A[number_row*n+number_column];
-
-        B[row]-=B[number_row]*coefficient;
-        A[row*n+column]=0;
-    }
-}
-
-
 
 template<typename T>
 Matrix<T> Matrix<T>::to_triangle(){
@@ -171,19 +96,21 @@ Matrix<T> Matrix<T>::to_triangle(){
 }
 
 template<typename T>
-Matrix<T>::Matrix(int width, int height, T arg, ...) {
+template< typename... Args, typename>
+Matrix<T>::Matrix(int width, int height, Args... args) {
     this->width = width;
     this->height = height;
-    va_list args;
-    va_start(args, arg);
     this->matrix=(T *) malloc(width * height * sizeof(T));
-    matrix[0] = arg;
-    for(int i = 0; i<height;i++){
-        for(int j = i==0?1:0; j<width;j++){
-            matrix[i*width+j] = va_arg(args, T);
-        }
-    }
-    va_end(args);
+
+    T res[sizeof...(Args)] = {args...};
+    std::memcpy(this->matrix, res, width * height * sizeof(T));
+ //   matrix[0] = ;
+//    for(int i = 0; i<height;i++){
+//        for(int j = i==0?1:0; j<width;j++){
+//            matrix[i*width+j] = va_arg(args, T);
+//        }
+//    }
+//    va_end(args);
 }
 
 template<typename T>
@@ -208,9 +135,7 @@ Matrix<T> Matrix<T>::operator*(Matrix<T> m1) {
 
     T *deviceA, *deviceB, *deviceC;
 
-    struct timeval t1{}, t2{};
-
-    gettimeofday(&t1, nullptr);
+    auto t1 = high_resolution_clock::now();
 
 
     gpuErrorChek(cudaMalloc((void **) &deviceA, this->width * this->height * sizeof(T)))
@@ -220,22 +145,21 @@ Matrix<T> Matrix<T>::operator*(Matrix<T> m1) {
     gpuErrorChek(cudaMemcpy(deviceA, this->data(), this->width * this->height * sizeof(T), cudaMemcpyHostToDevice))
     gpuErrorChek(cudaMemcpy(deviceB, m1.data(), m1.getWidth() * m1.getHeight() * sizeof(T), cudaMemcpyHostToDevice))
 
-    gettimeofday(&t2, nullptr);
+    auto t2 = high_resolution_clock::now();
+    auto time = duration_cast<microseconds>(t2 - t1);
 
-    double time = (1000000.0*((double )t2.tv_sec-(double)t1.tv_sec) + (double )t2.tv_usec-(double )t1.tv_usec)/1000.0;
+    printf("Time to copy from RAM to V-RAM:  %d us %1.5f s \n", time.count(), time.count()*1e-6);
 
-    printf("Time to copy from RAM to V-RAM:  %3.1f ms \n", time);
-
-    gettimeofday(&t1, nullptr);
+    t1 = high_resolution_clock::now();
     MatMul<<<dimGrid, dimBlock>>>(deviceA, deviceB, deviceC, this->width, this->height, m1.getWidth(), m1.getHeight(), CWidth, CHeight);
     //addMatrix<<<dimGrid, dimBlock>>>(deviceA, deviceB, deviceC, 3, 3);
     gpuErrorChek(cudaPeekAtLastError())
     gpuErrorChek(cudaDeviceSynchronize())
-    gettimeofday(&t2, nullptr);
+    t2 = high_resolution_clock::now();
 
-    time = (1000000.0*((double )t2.tv_sec-(double )t1.tv_sec) + (double )t2.tv_usec-(double )t1.tv_usec)/1000.0;
+    time = duration_cast<microseconds>(t2 - t1);
 
-    printf("Time to calculate on gpu:  %3.1f ms \n", time);
+    printf("Time to calculate on gpu:  %d us %1.5f s \n", time.count(), time.count()*1e-6);
 
     cudaMemcpy(result.data(), deviceC, CWidth * CHeight * sizeof(T), cudaMemcpyDeviceToHost);
 
@@ -295,19 +219,17 @@ void matrix_mul_cpu_impl(int M, int N, int K, const float * A, const float * B, 
 }
 
 template<typename T>
-__attribute__((unused))
 Matrix<T> Matrix<T>::multiplyCpu(Matrix<T> m1) {
-    struct timeval t1{}, t2{};
-
-    gettimeofday(&t1, nullptr);
+    auto t1 = high_resolution_clock::now();
 
     Matrix m(this->width, m1.getHeight());
     matrix_mul_cpu_impl(this->width, m1.getHeight(), this->height, this->data(), m1.data(), m.data());
-    gettimeofday(&t2, nullptr);
 
-    double time = (1000000.0*((double )t2.tv_sec-(double )t1.tv_sec) + (double )t2.tv_usec-(double )t1.tv_usec)/1000.0;
+    auto t2 = high_resolution_clock::now();
 
-    printf("Time to calculate on cpu:  %3.1f ms \n", time);
+    auto time = duration_cast<microseconds>(t2 - t1);
+
+    printf("Time to calculate on cpu:  %d us %1.5f s \n", time.count(), time.count()*1e-6);
 
     return m;
 }
@@ -326,9 +248,7 @@ Matrix<T> Matrix<T>::operator+(Matrix<T> m1) {
 
     float *deviceA, *deviceB, *deviceC;
 
-    struct timeval t1{}, t2{};
-
-    gettimeofday(&t1, nullptr);
+    auto t1 = high_resolution_clock::now();
 
 
     gpuErrorChek(cudaMalloc((void **) &deviceA, this->width * this->height * sizeof(float)))
@@ -338,21 +258,21 @@ Matrix<T> Matrix<T>::operator+(Matrix<T> m1) {
     gpuErrorChek(cudaMemcpy(deviceA, this->data(), this->width * this->height * sizeof(float), cudaMemcpyHostToDevice))
     gpuErrorChek(cudaMemcpy(deviceB, m1.data(), m1.getWidth() * m1.getHeight() * sizeof(float), cudaMemcpyHostToDevice))
 
-    gettimeofday(&t2, nullptr);
+    auto t2 = high_resolution_clock::now();
 
-    double time = (1000000.0*((double )t2.tv_sec-(double )t1.tv_sec) + (double)t2.tv_usec-(double)t1.tv_usec)/1000.0;
+    auto time = duration_cast<microseconds>(t2 - t1);
 
-    printf("Time to copy from RAM to V-RAM:  %3.1f ms \n", time);
+    printf("Time to copy from RAM to V-RAM:  %d us %1.5f s \n", time.count(), time.count()*1e-6);
 
-    gettimeofday(&t1, nullptr);
+    t1 = high_resolution_clock::now();
     addMatrix<<<dimGrid, dimBlock>>>(deviceA, deviceB, deviceC, this->width);
     gpuErrorChek(cudaPeekAtLastError())
     gpuErrorChek(cudaDeviceSynchronize())
-    gettimeofday(&t2, nullptr);
+    t2 = high_resolution_clock::now();
 
-    time = (1000000.0*((double )t2.tv_sec-(double )t1.tv_sec) + (double )t2.tv_usec-(double )t1.tv_usec)/1000.0;
+    time = duration_cast<microseconds>(t2 - t1);
 
-    printf("Time to calculate on gpu:  %3.1f ms \n", time);
+    printf("Time to calculate on gpu: %d us %1.5f s \n", time.count(), time.count()*1e-6);
 
     cudaMemcpy(result.data(), deviceC, CWidth * CHeight * sizeof(float), cudaMemcpyDeviceToHost);
 
@@ -390,18 +310,22 @@ Matrix<T> Matrix<T>::solve(Matrix b) {
 
     cudaEventRecord(start, nullptr);
 
-    for (int i = 0; i < this->height - 1; i++) {
+
+
+    for (int i = 0; i < /*this->height - 1*/2; i++) {
         kernel_SLAE_To_Triangle<<<Grid, Block>>>(dev_a, dev_b, this->height, i, i);
         gpuErrorChek(cudaPeekAtLastError())
         gpuErrorChek(cudaDeviceSynchronize())
-    }
-    //for (int i = this->height - 1; i >= 0; i--) kernel_up<<<Grid,Block>>>(dev_a, dev_b, this->height, i, i);
 
-    Matrix<T> resultMatrix(this->width, this->height);
+    }
+    kernel_up<<<Grid,Block>>>(dev_a, dev_b, this->height);
+
+
     Matrix<T> resultVector(b.getWidth(), b.getHeight());
+    Matrix<T> resultMatrix(this->width, this->height);
 
     cudaMemcpy(resultMatrix.data(), dev_a,this->width * this->height*sizeof(T),cudaMemcpyDeviceToHost);
-    cudaMemcpy(resultVector.data(), dev_a,b.getWidth() * b.getHeight()*sizeof(T),cudaMemcpyDeviceToHost);
+    cudaMemcpy(resultVector.data(), dev_b,b.getWidth() * b.getHeight()*sizeof(T),cudaMemcpyDeviceToHost);
 
     resultMatrix.print();
     resultVector.print();

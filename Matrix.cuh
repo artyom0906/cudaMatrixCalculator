@@ -7,13 +7,28 @@
 #define TILE_DIM 16                     // Tile dimension
 #include <iostream>
 #include <cstdarg>
+#include <chrono>
+#include <type_traits> // enable_if, conjuction
+
+#include <Gaus.cuh>
+#include <utils.cuh>
+
+
+using namespace std::chrono;
 using namespace std;
+
+
+
+template<class Head, class... Tail>
+using are_same = std::conjunction<std::is_same<Head, Tail>...>;
 
 template<typename T>
 class Matrix {
 public:
     explicit Matrix(int width, int height);
-    explicit Matrix(int width, int height, T arg...);
+
+    template<typename ... Args, typename = std::enable_if_t<are_same<T, Args...>::value, void>>
+    explicit Matrix(int width, int height, Args... args);
 
     Matrix operator*(Matrix m1);
 
@@ -23,7 +38,7 @@ public:
 
     int operator()();
 
-    __attribute__((unused)) Matrix multiplyCpu(Matrix m1);
+    Matrix multiplyCpu(Matrix m1);
 
     /*
      * @param results - vector of SLAE results
@@ -45,15 +60,12 @@ public:
         return width;
     }
 
+    Matrix<T> to_triangle();
 
-private:
+  private:
     T* matrix;
     int height{};
     int width{};
-
-protected:
-    Matrix<T> to_triangle();
 };
-
 
 #endif //CUDAMATRIXCALCULATOR_MATRIX_CUH
