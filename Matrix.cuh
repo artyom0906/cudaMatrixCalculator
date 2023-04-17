@@ -8,10 +8,12 @@
 #include <iostream>
 #include <cstdarg>
 #include <chrono>
+#include <iomanip>
 #include <type_traits> // enable_if, conjuction
 
 #include <Gaus.cuh>
 #include <utils.cuh>
+#include <PLUfactorisation.cuh>
 
 
 using namespace std::chrono;
@@ -40,15 +42,21 @@ public:
 
     Matrix multiplyCpu(Matrix m1);
 
+    Matrix<T> forward_substitution(Matrix<T> b);
+    Matrix<T> backward_substitution(Matrix<T> b);
+
+    std::tuple<Matrix, Matrix, Matrix> PLU_factorisation();
+
     /*
      * @param results - vector of SLAE results
      *
      * @return
      */
-    Matrix solve(Matrix results);
+    std::tuple<Matrix<T>, Matrix<T>> Matrix<T>::solve(Matrix b);
 
 
     void randomize();
+    void eye();
     T* data();
 
     void print() const;
@@ -67,5 +75,6 @@ public:
     int height{};
     int width{};
 };
+
 
 #endif //CUDAMATRIXCALCULATOR_MATRIX_CUH

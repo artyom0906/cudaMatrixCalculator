@@ -95,6 +95,67 @@ Matrix<T> Matrix<T>::to_triangle(){
     return result;
 }
 
+template <typename T>
+std::tuple<Matrix<T>, Matrix<T>, Matrix<T>> Matrix<T>::PLU_factorisation() {
+    T *dev_p, *dev_l, *dev_u, *dev_max_val;
+    unsigned int *dev_max_idx;
+
+    Matrix<T> P(this->width, this->height);
+    Matrix<T> L(this->width, this->height);
+    Matrix<T> U(this->width, this->height);
+    P.eye();
+    auto t1 = high_resolution_clock::now();
+    cudaMalloc((void **) &dev_p, this->width * this->height * sizeof(T ));
+    cudaMalloc((void **) &dev_l, this->width * this->height * sizeof(T ));
+    cudaMalloc((void **) &dev_u, this->width * this->height * sizeof(T ));
+
+    cudaMalloc((void **) &dev_max_val, max(this->height/(TILE_DIM), 1) * sizeof(T ));
+    cudaMalloc((void **) &dev_max_idx, max(this->height/(TILE_DIM), 1) * sizeof(int));
+
+    cudaMemcpy(dev_u, this->matrix, this->width * this->height  * sizeof(T), cudaMemcpyHostToDevice);
+
+
+
+    cudaMemcpy(dev_p, P.data(), this->width * this->height  * sizeof(T), cudaMemcpyHostToDevice);
+    cudaMemcpy(dev_l, P.data(), this->width * this->height  * sizeof(T), cudaMemcpyHostToDevice);
+
+
+    auto t2 = high_resolution_clock::now();
+    auto time = duration_cast<microseconds>(t2 - t1);
+    printf("Time to copy from RAM to V-RAM: %d us %1.5f s \n", time.count(), time.count()*1e-6);
+    dim3 Grid(ceil(this->width/(TILE_DIM*1.)), ceil(this->height/(TILE_DIM*1.)));
+    dim3 Block(TILE_DIM, TILE_DIM);
+
+    t1 = high_resolution_clock::now();
+    for (int i = 0; i < this->width-1; i++) {
+        kernel_max_mod_cols<<<Grid, Block>>>(dev_u, dev_max_val, dev_max_idx, i, this->width, this->height);
+        gpuErrorChek(cudaPeekAtLastError());
+        gpuErrorChek(cudaDeviceSynchronize());
+
+        unsigned int *maxIdx = (unsigned int*)malloc(max(this->height/(TILE_DIM), 1) * sizeof(unsigned int));
+        cudaMemcpy(maxIdx, dev_max_idx,max(this->height/(TILE_DIM), 1) * sizeof(unsigned int),cudaMemcpyDeviceToHost);
+
+        kernel_swap_rows_and_simplify<<<Grid, Block>>>(dev_u, dev_p, dev_l, i, maxIdx[0], this->width, this->height);
+        gpuErrorChek(cudaPeekAtLastError());
+        gpuErrorChek(cudaDeviceSynchronize());
+
+    }
+    t2 = high_resolution_clock::now();
+    time = duration_cast<microseconds>(t2 - t1);
+    printf("Time  to calculate on gpu: %d us %1.5f s \n", time.count(), time.count()*1e-6);
+    t1 = high_resolution_clock::now();
+    cudaMemcpy(U.data(), dev_u, this->width * this->height  * sizeof(T), cudaMemcpyDeviceToHost);
+    cudaMemcpy(L.data(), dev_l, this->width * this->height  * sizeof(T), cudaMemcpyDeviceToHost);
+    cudaMemcpy(P.data(), dev_p, this->width * this->height  * sizeof(T), cudaMemcpyDeviceToHost);
+    t2 = high_resolution_clock::now();
+    time = duration_cast<microseconds>(t2 - t1);
+    printf("Time to copy from V-RAM to RAM: %d us %1.5f s \n", time.count(), time.count()*1e-6);
+    cudaFree(dev_u);
+    cudaDeviceReset();
+
+    return std::tuple<Matrix, Matrix, Matrix>(P, L, U);
+}
+
 template<typename T>
 template< typename... Args, typename>
 Matrix<T>::Matrix(int width, int height, Args... args) {
@@ -117,7 +178,7 @@ template<typename T>
 Matrix<T>::Matrix(int width, int height) {
     this->width = width;
     this->height = height;
-    this->matrix=(T *) malloc(width * height * sizeof(T));
+    this->matrix=(T *) calloc(width * height, sizeof(T));
 }
 
 template<typename T>
@@ -179,7 +240,7 @@ template<typename T>
 void Matrix<T>::print() const {
     for(int i = 0; i < height; i++){
         for(int j = 0; j < width; j++){
-            cout<<matrix[i*width+j]<<" ";
+            cout << std::fixed<< std::setprecision(6)<<matrix[i*width+j]<<"\t";
         }
         cout<<endl;
     }
@@ -290,7 +351,7 @@ int Matrix<T>::operator()() {
 }
 
 template<typename T>
-Matrix<T> Matrix<T>::solve(Matrix b) {
+std::tuple<Matrix<T>, Matrix<T>> Matrix<T>::solve(Matrix b) {
     T *dev_a, *dev_b;
 
     cudaMalloc((void **) &dev_a, this->width * this->height * sizeof(T));
@@ -299,7 +360,7 @@ Matrix<T> Matrix<T>::solve(Matrix b) {
     cudaMemcpy(dev_a, this->matrix, this->width * this->height  * sizeof(T), cudaMemcpyHostToDevice);
     cudaMemcpy(dev_b, b.data(), b.getWidth() * b.getHeight()  * sizeof(T), cudaMemcpyHostToDevice);
 
-    dim3 Grid(ceil(this->width/(TILE_DIM*1.)), ceil(this->height/(TILE_DIM*1.)));
+    dim3 Grid(max(this->width/(TILE_DIM), 1), max(this->height/(TILE_DIM), 1));
     dim3 Block(TILE_DIM, TILE_DIM);
 
     cudaEvent_t start, stop;
@@ -311,8 +372,7 @@ Matrix<T> Matrix<T>::solve(Matrix b) {
     cudaEventRecord(start, nullptr);
 
 
-
-    for (int i = 0; i < /*this->height - 1*/2; i++) {
+    for (int i = 0; i < this->height - 1; i++) {
         kernel_SLAE_To_Triangle<<<Grid, Block>>>(dev_a, dev_b, this->height, i, i);
         gpuErrorChek(cudaPeekAtLastError())
         gpuErrorChek(cudaDeviceSynchronize())
@@ -327,8 +387,8 @@ Matrix<T> Matrix<T>::solve(Matrix b) {
     cudaMemcpy(resultMatrix.data(), dev_a,this->width * this->height*sizeof(T),cudaMemcpyDeviceToHost);
     cudaMemcpy(resultVector.data(), dev_b,b.getWidth() * b.getHeight()*sizeof(T),cudaMemcpyDeviceToHost);
 
-    resultMatrix.print();
-    resultVector.print();
+//    resultMatrix.print();
+//    resultVector.print();
 
     //for (int i = 0; i < n - 1; i++) h_C[i]=h_B[i]/h_A[i*n+i];
 
@@ -342,7 +402,51 @@ Matrix<T> Matrix<T>::solve(Matrix b) {
     cudaFree(dev_b);
     cudaDeviceReset();
 
-    return Matrix<T>(0, 0);
+    return std::tuple<Matrix<T>, Matrix<T>>(resultMatrix, resultVector);
+}
+
+template <typename T> Matrix<T> Matrix<T>::forward_substitution(Matrix<T> b) {
+    int m = b.getWidth();
+    Matrix<T> x(m, 1);
+    for(int i = 0; i < m; i++){
+        x.data()[i] = 1;
+        if(abs(this->data()[i* this->width+i])<1E-7){
+            x.data()[i] = 0;
+        }
+        T val = b.data()[i];
+        for(int j = 0; j < i; j++){
+            val -= this->data()[i* this->width+j] * x.data()[j];
+        }
+        val /= this->data()[i* this->width+i];
+
+        x.data()[i] = val;
+    }
+    return x;
+}
+
+template <typename T> Matrix<T> Matrix<T>::backward_substitution(Matrix<T> b) {
+    int m = b.getWidth();
+    Matrix<T> x(m, 1);
+    for(int i = m; i > -1; i--){
+        x.data()[i] = 1;
+        if(abs(this->data()[i* this->width+i])<1E-7){
+            x.data()[i] = 0;
+        }
+        T val = b.data()[i];
+        for(int j = i+1; j < m; j++){
+            val -= this->data()[i* this->width+j] * x.data()[j];
+        }
+        val /= this->data()[i* this->width+i];
+
+        x.data()[i] = val;
+    }
+    return x;
+}
+
+template <typename T> void Matrix<T>::eye() {
+    for(int i = 0; i < min(this->width, this->height); i++){
+        this->matrix[i* this->width+i] = 1;
+    }
 }
 
 
